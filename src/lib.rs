@@ -1,9 +1,12 @@
 use alloy_primitives::{address, U256};
 use alloy_sol_types::{sol, SolCall};
 use cartesi_machine::{
+    cartesi_machine_sys::{cm_concurrency_runtime_config, cm_htif_runtime_config},
     configuration::{MemoryRangeConfig, RuntimeConfig},
     Machine,
 };
+use std::ffi::CString;
+
 use std::{collections::HashMap, io::Error};
 const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
 const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
@@ -29,19 +32,30 @@ fn advance_runner(
     let mut machine = Machine::load(
         std::path::Path::new(machine_snapshot.as_str()),
         RuntimeConfig {
-            skip_root_hash_check: true,
-            skip_root_hash_store: true,
-            ..Default::default()
+            values: cartesi_machine::cartesi_machine_sys::cm_machine_runtime_config {
+                skip_root_hash_check: true,
+                skip_root_hash_store: true,
+                concurrency: cm_concurrency_runtime_config {
+                    update_merkle_tree: 0,
+                },
+                htif: cm_htif_runtime_config {
+                    no_console_putchar: false,
+                },
+                skip_version_check: false,
+                soft_yield: false,
+            },
         },
     )
     .unwrap();
-
+    let cs_filename = CString::new(lambda_state_next.to_string()).unwrap();
+    let mut cs_filename_bytes: Vec<u8> = cs_filename.into_bytes();
+    let filename_pointer: *const i8 = cs_filename_bytes.as_mut_ptr() as *const i8;
     machine
-        .replace_memory_range(MemoryRangeConfig {
+        .replace_memory_range(&MemoryRangeConfig {
             start: MEMORY_RANGE_CONFIG_START,
             length: MEMORY_RANGE_CONFIG_LENGTH,
             shared: true,
-            image_filename: Some(lambda_state_next.to_string()),
+            image_filename: filename_pointer,
         })
         .unwrap();
 
@@ -93,6 +107,7 @@ fn encode_evm_advance(payload: Vec<u8>) -> Vec<u8> {
             address msgSender,
             uint256 blockNumber,
             uint256 blockTimestamp,
+            uint256 prevRandao,
             uint256 index,
             bytes calldata payload
         ) external;
@@ -103,6 +118,7 @@ fn encode_evm_advance(payload: Vec<u8>) -> Vec<u8> {
         msgSender: address!(),
         blockNumber: U256::from(0),
         blockTimestamp: U256::from(0),
+        prevRandao: U256::from(0),
         index: U256::from(0),
         payload: payload.into(),
     };
