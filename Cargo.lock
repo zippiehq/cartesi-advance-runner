@@ -399,7 +399,7 @@ checksum = "428d9aa8fbc0670b7b8d6030a7fadd0f86151cae55e4dbbece15f3780a3dfaf3"
 [[package]]
 name = "cartesi-machine"
 version = "0.18.1"
-source = "git+https://github.com/cartesi/dave?branch=main#68a068b135a42c10e254a116e2930539f1c28727"
+source = "git+https://github.com/cartesi/dave?rev=68a068b135a42c10e254a116e2930539f1c28727#68a068b135a42c10e254a116e2930539f1c28727"
 dependencies = [
  "cartesi-machine-sys",
  "hex",
@@ -409,7 +409,7 @@ dependencies = [
 [[package]]
 name = "cartesi-machine-sys"
 version = "0.18.1"
-source = "git+https://github.com/cartesi/dave?branch=main#68a068b135a42c10e254a116e2930539f1c28727"
+source = "git+https://github.com/cartesi/dave?rev=68a068b135a42c10e254a116e2930539f1c28727#68a068b135a42c10e254a116e2930539f1c28727"
 dependencies = [
  "bindgen",
  "bytes",

@@ -11,8 +11,6 @@ use std::{collections::HashMap, io::Error};
 const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
 const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
 const HTIF_YIELD_REASON_TX_OUTPUT_DEF: u16 = 0x1;
-const HTIF_YIELD_REASON_TX_VOUCHER_DEF: u16 = 0x2;
-
 const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 
 const MEMORY_RANGE_CONFIG_LENGTH: u64 = 4096;
@@ -68,34 +66,38 @@ fn advance_runner(
     //TODO send gio response with metadata etc.
 
     let max_cycles = u64::MAX;
-    let _ = Some(machine.run(max_cycles).unwrap());
-    let data = machine.read_htif_tohost_data().unwrap();
-    const M16: u64 = (1 << 16) - 1;
-    const M32: u64 = (1 << 32) - 1;
-    let reason = ((data >> 32) & M16) as u16;
-    let length = data & M32; // length
-    let data = machine
-        .read_memory(PMA_CMIO_TX_BUFFER_START_DEF, length)
-        .unwrap();
-    match reason {
-        HTIF_YIELD_REASON_TX_REPORT_DEF => {
-            report_callback(reason, &data).unwrap();
+
+    loop {
+        if !machine.read_iflags_y().unwrap() {
+            let _ = Some(machine.run(max_cycles).unwrap());
         }
-        HTIF_YIELD_REASON_TX_OUTPUT_DEF => {
-            output_callback(reason, &data).unwrap();
-        }
-        HTIF_YIELD_REASON_TX_VOUCHER_DEF => {}
-        _ => {
-            match callbacks.get(&(reason as u32)) {
+        let data = machine.read_htif_tohost_data().unwrap();
+        const M16: u64 = (1 << 16) - 1;
+        const M32: u64 = (1 << 32) - 1;
+        let reason = ((data >> 32) & M16) as u16;
+        let length = data & M32; // length
+        let data = machine
+            .read_memory(PMA_CMIO_TX_BUFFER_START_DEF, length)
+            .unwrap();
+        match reason {
+            HTIF_YIELD_REASON_TX_REPORT_DEF => {
+                report_callback(reason, &data).unwrap();
+            }
+            HTIF_YIELD_REASON_TX_OUTPUT_DEF => {
+                output_callback(reason, &data).unwrap();
+            }
+            _ => match callbacks.get(&(reason as u32)) {
                 Some(unknown_gio_callback) => {
                     unknown_gio_callback(reason, &data).unwrap();
                 }
                 None => {
                     println!("No callback found");
+                    drop(machine);
+                    break;
                 }
-            }
-            drop(machine);
+            },
         }
+        machine.reset_iflags_y().unwrap();
     }
 }
 
