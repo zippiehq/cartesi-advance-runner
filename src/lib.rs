@@ -7,7 +7,10 @@ use cartesi_machine::{
 };
 use std::ffi::CString;
 
-use std::{collections::HashMap, io::Error};
+use std::{
+    collections::HashMap,
+    io::{Error, ErrorKind},
+};
 const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
 const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
 const HTIF_YIELD_REASON_TX_OUTPUT_DEF: u16 = 0x1;
@@ -15,7 +18,8 @@ const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 
 const MEMORY_RANGE_CONFIG_LENGTH: u64 = 4096;
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
-
+const M16: u64 = (1 << 16) - 1;
+const M32: u64 = (1 << 32) - 1;
 fn advance_runner(
     machine_snapshot: String,
     lambda_state_previous: &str,
@@ -25,7 +29,7 @@ fn advance_runner(
     report_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     output_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
-) {
+) -> Result<(), Error> {
     reflink::reflink(lambda_state_previous, lambda_state_next).unwrap();
     let mut machine = Machine::load(
         std::path::Path::new(machine_snapshot.as_str()),
@@ -57,13 +61,24 @@ fn advance_runner(
         })
         .unwrap();
 
-    let payload = payload;
-    let encoded = encode_evm_advance(payload);
-    machine
-        .send_cmio_response(HTIF_YIELD_REASON_ADVANCE_STATE_DEF, &encoded)
-        .unwrap();
+    let mut data = machine.read_htif_tohost_data().unwrap();
+    let mut reason = ((data >> 32) & M16) as u16;
 
-    //TODO send gio response with metadata etc.
+    if reason == HTIF_YIELD_REASON_ADVANCE_STATE_DEF {
+        let payload = payload;
+        let encoded = encode_evm_advance(payload);
+        machine
+            .send_cmio_response(HTIF_YIELD_REASON_ADVANCE_STATE_DEF, &encoded)
+            .unwrap();
+        //TODO send gio response with metadata etc.
+
+        machine.reset_iflags_y().unwrap();
+    } else {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("current reason is {:?}, but 0 was expected", reason),
+        ));
+    }
 
     let max_cycles = u64::MAX;
 
@@ -71,10 +86,8 @@ fn advance_runner(
         if !machine.read_iflags_y().unwrap() {
             let _ = Some(machine.run(max_cycles).unwrap());
         }
-        let data = machine.read_htif_tohost_data().unwrap();
-        const M16: u64 = (1 << 16) - 1;
-        const M32: u64 = (1 << 32) - 1;
-        let reason = ((data >> 32) & M16) as u16;
+        data = machine.read_htif_tohost_data().unwrap();
+        reason = ((data >> 32) & M16) as u16;
         let length = data & M32; // length
         let data = machine
             .read_memory(PMA_CMIO_TX_BUFFER_START_DEF, length)
@@ -99,6 +112,7 @@ fn advance_runner(
         }
         machine.reset_iflags_y().unwrap();
     }
+    return Ok(());
 }
 
 fn encode_evm_advance(payload: Vec<u8>) -> Vec<u8> {
