@@ -20,7 +20,7 @@ const MEMORY_RANGE_CONFIG_LENGTH: u64 = 4096;
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
 const M16: u64 = (1 << 16) - 1;
 const M32: u64 = (1 << 32) - 1;
-fn advance_runner(
+pub fn run_advance(
     machine_snapshot: String,
     lambda_state_previous: &str,
     lambda_state_next: &str,
