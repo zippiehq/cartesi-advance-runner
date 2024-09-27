@@ -7,10 +7,15 @@ use cartesi_machine::{
 };
 use std::ffi::CString;
 
+use snafu::Snafu;
 use std::{
     collections::HashMap,
     io::{Error, ErrorKind},
 };
+pub mod hash;
+mod merkle_tree;
+pub mod proofs;
+
 const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
 const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
 const HTIF_YIELD_REASON_TX_OUTPUT_DEF: u16 = 0x1;
