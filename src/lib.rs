@@ -7,7 +7,7 @@ use cartesi_machine::{
 };
 use std::ffi::CString;
 
-use snafu::Snafu;
+use std::fs::File;
 use std::{
     collections::HashMap,
     io::{Error, ErrorKind},
@@ -21,7 +21,6 @@ const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
 const HTIF_YIELD_REASON_TX_OUTPUT_DEF: u16 = 0x1;
 const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 
-const MEMORY_RANGE_CONFIG_LENGTH: u64 = 4096;
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
 const M16: u64 = (1 << 16) - 1;
 const M32: u64 = (1 << 32) - 1;
@@ -35,7 +34,17 @@ pub fn run_advance(
     output_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
 ) -> Result<(), Error> {
-    reflink::reflink(lambda_state_previous, lambda_state_next).unwrap();
+    match reflink::reflink_or_copy(lambda_state_previous, lambda_state_next) {
+        Ok(Some(_)) => {
+            eprintln!("WARNING: could not reflink lambda state, copying instead");
+        }
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    let lambda_state_previous_file = File::open(lambda_state_previous).unwrap();
+    let lambda_state_previous_file_size = lambda_state_previous_file.metadata().unwrap().len();
+
     let mut machine = Machine::load(
         std::path::Path::new(machine_snapshot.as_str()),
         RuntimeConfig {
@@ -60,7 +69,7 @@ pub fn run_advance(
     machine
         .replace_memory_range(&MemoryRangeConfig {
             start: MEMORY_RANGE_CONFIG_START,
-            length: MEMORY_RANGE_CONFIG_LENGTH,
+            length: lambda_state_previous_file_size,
             shared: true,
             image_filename: filename_pointer,
         })
