@@ -6,6 +6,7 @@ use cartesi_machine::{
     Machine,
 };
 use std::ffi::CString;
+use std::rc::Rc;
 
 use std::fs::File;
 use std::{
@@ -31,8 +32,9 @@ pub fn run_advance(
     payload: Vec<u8>,
     metadata: HashMap<Vec<u8>, Vec<u8>>,
     report_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
-    output_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
+    output_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
+    no_console_putchar: bool,
 ) -> Result<(), Error> {
     match reflink::reflink_or_copy(lambda_state_previous, lambda_state_next) {
         Ok(Some(_)) => {
