@@ -6,7 +6,6 @@ use cartesi_machine::{
     Machine,
 };
 use std::ffi::CString;
-use std::rc::Rc;
 
 use std::fs::File;
 use std::{
@@ -16,15 +15,27 @@ use std::{
 pub mod hash;
 mod merkle_tree;
 pub mod proofs;
-
+const HTIF_YIELD_CMD_AUTOMATIC: u64 = 0;
+const HTIF_YIELD_CMD_MANUAL: u64 = 1;
 const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
-const HTIF_YIELD_REASON_TX_REPORT_DEF: u16 = 0x4;
-const HTIF_YIELD_REASON_TX_OUTPUT_DEF: u16 = 0x1;
+const HTIF_YIELD_AUTOMATIC_REASON_TX_REPORT: u16 = 0x4;
+const HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT: u16 = 0x2;
+
+const HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED: u16 = 0x1;
+const HTIF_YIELD_MANUAL_REASON_RX_REJECTED: u16 = 0x2;
+const HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION: u16 = 0x4;
+
 const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
 const M16: u64 = (1 << 16) - 1;
 const M32: u64 = (1 << 32) - 1;
+
+enum YieldManualReason {
+    Accepted,
+    Rejected,
+    Exception,
+}
 pub fn run_advance(
     machine_snapshot: String,
     lambda_state_previous: &str,
@@ -35,7 +46,7 @@ pub fn run_advance(
     output_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
     no_console_putchar: bool,
-) -> Result<(), Error> {
+) -> Result<YieldManualReason, Error> {
     match reflink::reflink_or_copy(lambda_state_previous, lambda_state_next) {
         Ok(Some(_)) => {
             eprintln!("WARNING: could not reflink lambda state, copying instead");
@@ -103,32 +114,61 @@ pub fn run_advance(
             let _ = Some(machine.run(max_cycles).unwrap());
         }
         data = machine.read_htif_tohost_data().unwrap();
+        let cmd = machine.read_htif_tohost_cmd().unwrap();
         reason = ((data >> 32) & M16) as u16;
         let length = data & M32; // length
         let data = machine
             .read_memory(PMA_CMIO_TX_BUFFER_START_DEF, length)
             .unwrap();
-        match reason {
-            HTIF_YIELD_REASON_TX_REPORT_DEF => {
-                report_callback(reason, &data).unwrap();
-            }
-            HTIF_YIELD_REASON_TX_OUTPUT_DEF => {
-                output_callback(reason, &data).unwrap();
-            }
-            _ => match callbacks.get(&(reason as u32)) {
-                Some(unknown_gio_callback) => {
-                    unknown_gio_callback(reason, &data).unwrap();
+
+        match cmd {
+            HTIF_YIELD_CMD_AUTOMATIC => match reason {
+                HTIF_YIELD_AUTOMATIC_REASON_TX_REPORT => {
+                    report_callback(reason, &data).unwrap();
                 }
-                None => {
-                    println!("No callback found");
-                    drop(machine);
-                    break;
+                HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT => {
+                    output_callback(reason, &data).unwrap();
+                }
+                _ => match callbacks.get(&(reason as u32)) {
+                    Some(unknown_gio_callback) => {
+                        unknown_gio_callback(reason, &data).unwrap();
+                    }
+                    None => {
+                        println!("No callback found");
+                        drop(machine);
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("No callback found"),
+                        ));
+                    }
+                },
+            },
+            HTIF_YIELD_CMD_MANUAL => match reason {
+                HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
+                    return Ok(YieldManualReason::Accepted);
+                }
+                HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
+                    return Ok(YieldManualReason::Rejected);
+                }
+                HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION => {
+                    return Ok(YieldManualReason::Exception);
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("unknown reason {:?}", reason),
+                    ));
                 }
             },
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("unknown cmd {:?}", cmd),
+                ));
+            }
         }
         machine.reset_iflags_y().unwrap();
     }
-    return Ok(());
 }
 
 fn encode_evm_advance(payload: Vec<u8>) -> Vec<u8> {
