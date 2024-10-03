@@ -31,7 +31,7 @@ pub fn run_advance(
     lambda_state_next: &str,
     payload: Vec<u8>,
     metadata: HashMap<Vec<u8>, Vec<u8>>,
-    report_callback: Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
+    report_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     output_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
     no_console_putchar: bool,
