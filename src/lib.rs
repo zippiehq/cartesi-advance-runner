@@ -31,7 +31,7 @@ const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
 const M16: u64 = (1 << 16) - 1;
 const M32: u64 = (1 << 32) - 1;
 
-enum YieldManualReason {
+pub enum YieldManualReason {
     Accepted,
     Rejected,
     Exception,
@@ -90,8 +90,9 @@ pub fn run_advance(
 
     let mut data = machine.read_htif_tohost_data().unwrap();
     let mut reason = ((data >> 32) & M16) as u16;
+    let cmd = machine.read_htif_tohost_cmd().unwrap();
 
-    if reason == HTIF_YIELD_REASON_ADVANCE_STATE_DEF {
+    if reason == HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED && cmd == HTIF_YIELD_CMD_MANUAL {
         let payload = payload;
         let encoded = encode_evm_advance(payload);
         machine
