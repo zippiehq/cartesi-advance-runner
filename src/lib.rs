@@ -30,33 +30,39 @@ const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
 const M16: u64 = (1 << 16) - 1;
 const M32: u64 = (1 << 32) - 1;
-
+#[derive(PartialEq)]
 pub enum YieldManualReason {
     Accepted,
     Rejected,
     Exception,
 }
+pub struct RunAdvanceLambdaStatePaths {
+    pub lambda_state_previous_path: String,
+    pub lambda_state_next_path: String,
+}
 pub fn run_advance(
     machine_snapshot: String,
-    lambda_state_previous: &str,
-    lambda_state_next: &str,
+    lambda_state_paths: Option<RunAdvanceLambdaStatePaths>,
     payload: Vec<u8>,
     metadata: HashMap<Vec<u8>, Vec<u8>>,
     report_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     output_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
+    finish_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
     callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
     no_console_putchar: bool,
 ) -> Result<YieldManualReason, Error> {
-    match reflink::reflink_or_copy(lambda_state_previous, lambda_state_next) {
-        Ok(Some(_)) => {
-            eprintln!("WARNING: could not reflink lambda state, copying instead");
+    if let Some(lambda_state_paths) = &lambda_state_paths {
+        match reflink::reflink_or_copy(
+            &lambda_state_paths.lambda_state_previous_path,
+            &lambda_state_paths.lambda_state_next_path,
+        ) {
+            Ok(Some(_)) => {
+                eprintln!("WARNING: could not reflink lambda state, copying instead");
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e),
         }
-        Ok(None) => {}
-        Err(e) => return Err(e),
     }
-
-    let lambda_state_previous_file = File::open(lambda_state_previous).unwrap();
-    let lambda_state_previous_file_size = lambda_state_previous_file.metadata().unwrap().len();
 
     let mut machine = Machine::load(
         std::path::Path::new(machine_snapshot.as_str()),
@@ -76,18 +82,22 @@ pub fn run_advance(
         },
     )
     .unwrap();
-    let cs_filename = CString::new(lambda_state_next.to_string()).unwrap();
-    let mut cs_filename_bytes: Vec<u8> = cs_filename.into_bytes();
-    let filename_pointer: *const i8 = cs_filename_bytes.as_mut_ptr() as *const i8;
-    machine
-        .replace_memory_range(&MemoryRangeConfig {
-            start: MEMORY_RANGE_CONFIG_START,
-            length: lambda_state_previous_file_size,
-            shared: true,
-            image_filename: filename_pointer,
-        })
-        .unwrap();
-
+    if let Some(lambda_state_paths) = lambda_state_paths {
+        let lambda_state_previous_file =
+            File::open(lambda_state_paths.lambda_state_previous_path).unwrap();
+        let lambda_state_previous_file_size = lambda_state_previous_file.metadata().unwrap().len();
+        let cs_filename = CString::new(lambda_state_paths.lambda_state_next_path).unwrap();
+        let mut cs_filename_bytes: Vec<u8> = cs_filename.into_bytes();
+        let filename_pointer: *const i8 = cs_filename_bytes.as_mut_ptr() as *const i8;
+        machine
+            .replace_memory_range(&MemoryRangeConfig {
+                start: MEMORY_RANGE_CONFIG_START,
+                length: lambda_state_previous_file_size,
+                shared: true,
+                image_filename: filename_pointer,
+            })
+            .unwrap();
+    }
     let mut data = machine.read_htif_tohost_data().unwrap();
     let mut reason = ((data >> 32) & M16) as u16;
     let cmd = machine.read_htif_tohost_cmd().unwrap();
@@ -146,6 +156,7 @@ pub fn run_advance(
             },
             HTIF_YIELD_CMD_MANUAL => match reason {
                 HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
+                    finish_callback(reason, &data).unwrap();
                     return Ok(YieldManualReason::Accepted);
                 }
                 HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
