@@ -8,6 +8,7 @@ use cartesi_machine::{
 use std::ffi::CString;
 
 use std::fs::File;
+use std::os::raw::c_char;
 use std::{
     collections::HashMap,
     io::{Error, ErrorKind},
@@ -88,7 +89,7 @@ pub fn run_advance(
         let lambda_state_previous_file_size = lambda_state_previous_file.metadata().unwrap().len();
         let cs_filename = CString::new(lambda_state_paths.lambda_state_next_path).unwrap();
         let mut cs_filename_bytes: Vec<u8> = cs_filename.into_bytes();
-        let filename_pointer: *const i8 = cs_filename_bytes.as_mut_ptr() as *const i8;
+        let filename_pointer: *const c_char = cs_filename_bytes.as_mut_ptr() as *const c_char;
         machine
             .replace_memory_range(&MemoryRangeConfig {
                 start: MEMORY_RANGE_CONFIG_START,
