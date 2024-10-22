@@ -75,7 +75,7 @@ pub fn run_advance(
                     update_merkle_tree: 0,
                 },
                 htif: cm_htif_runtime_config {
-                    no_console_putchar: false,
+                    no_console_putchar: no_console_putchar,
                 },
                 skip_version_check: false,
                 soft_yield: false,
