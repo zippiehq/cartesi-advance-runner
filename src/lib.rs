@@ -1,18 +1,17 @@
-use alloy_primitives::{address, U256};
+use alloy_primitives::{address, Uint, U256};
 use alloy_sol_types::{sol, SolCall};
 use cartesi_machine::{
     cartesi_machine_sys::{cm_concurrency_runtime_config, cm_htif_runtime_config},
     configuration::{MemoryRangeConfig, RuntimeConfig},
     Machine,
 };
+use std::error::Error;
 use std::ffi::CString;
-
 use std::fs::File;
+use std::future::Future;
 use std::os::raw::c_char;
-use std::{
-    collections::HashMap,
-    io::{Error, ErrorKind},
-};
+use std::pin::Pin;
+use std::{collections::HashMap, io::ErrorKind};
 pub mod hash;
 mod merkle_tree;
 pub mod proofs;
@@ -41,17 +40,20 @@ pub struct RunAdvanceLambdaStatePaths {
     pub lambda_state_previous_path: String,
     pub lambda_state_next_path: String,
 }
-pub fn run_advance(
+pub async fn run_advance(
     machine_snapshot: String,
     lambda_state_paths: Option<RunAdvanceLambdaStatePaths>,
     payload: Vec<u8>,
     metadata: HashMap<Vec<u8>, Vec<u8>>,
-    report_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
-    output_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
-    finish_callback: &mut Box<impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>,
-    callbacks: HashMap<u32, Box<dyn Fn(u16, &[u8]) -> Result<(u16, Vec<u8>), Error>>>,
+    report_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
+    output_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
+    finish_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
+    callbacks: HashMap<
+        u32,
+        Box<dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>>,
+    >,
     no_console_putchar: bool,
-) -> Result<YieldManualReason, Error> {
+) -> Result<YieldManualReason, Box<dyn Error>> {
     if let Some(lambda_state_paths) = &lambda_state_paths {
         match reflink::reflink_or_copy(
             &lambda_state_paths.lambda_state_previous_path,
@@ -61,7 +63,7 @@ pub fn run_advance(
                 eprintln!("WARNING: could not reflink lambda state, copying instead");
             }
             Ok(None) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(Box::new(e)),
         }
     }
 
@@ -113,10 +115,10 @@ pub fn run_advance(
 
         machine.reset_iflags_y().unwrap();
     } else {
-        return Err(Error::new(
+        return Err(Box::new(std::io::Error::new(
             ErrorKind::Other,
             format!("current reason is {:?}, but 0 was expected", reason),
-        ));
+        )));
     }
 
     let max_cycles = u64::MAX;
@@ -136,28 +138,30 @@ pub fn run_advance(
         match cmd {
             HTIF_YIELD_CMD_AUTOMATIC => match reason {
                 HTIF_YIELD_AUTOMATIC_REASON_TX_REPORT => {
-                    report_callback(reason, &data).unwrap();
+                    report_callback(reason, &data)?;
                 }
                 HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT => {
-                    output_callback(reason, &data).unwrap();
+                    output_callback(reason, &data)?;
                 }
                 _ => match callbacks.get(&(reason as u32)) {
                     Some(unknown_gio_callback) => {
-                        unknown_gio_callback(reason, &data).unwrap();
+                        machine
+                            .send_cmio_response(reason, &unknown_gio_callback(reason, data).await?)
+                            .unwrap();
                     }
                     None => {
                         println!("No callback found");
                         drop(machine);
-                        return Err(std::io::Error::new(
+                        return Err(Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("No callback found"),
-                        ));
+                        )));
                     }
                 },
             },
             HTIF_YIELD_CMD_MANUAL => match reason {
                 HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
-                    finish_callback(reason, &data).unwrap();
+                    finish_callback(reason, &data)?;
                     return Ok(YieldManualReason::Accepted);
                 }
                 HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
@@ -167,17 +171,17 @@ pub fn run_advance(
                     return Ok(YieldManualReason::Exception);
                 }
                 _ => {
-                    return Err(std::io::Error::new(
+                    return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("unknown reason {:?}", reason),
-                    ));
+                    )));
                 }
             },
             _ => {
-                return Err(std::io::Error::new(
+                return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("unknown cmd {:?}", cmd),
-                ));
+                )));
             }
         }
         machine.reset_iflags_y().unwrap();
