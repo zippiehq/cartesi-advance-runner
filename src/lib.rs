@@ -48,10 +48,7 @@ pub async fn run_advance(
     report_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
     output_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
     finish_callback: &mut impl FnMut(u16, &[u8]) -> Result<(u16, Vec<u8>), Box<dyn Error>>,
-    callbacks: HashMap<
-        u32,
-        Box<dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>>,
-    >,
+    callbacks: HashMap<u32, Callback>,
     no_console_putchar: bool,
 ) -> Result<YieldManualReason, Box<dyn Error>> {
     if let Some(lambda_state_paths) = &lambda_state_paths {
@@ -145,8 +142,12 @@ pub async fn run_advance(
                 }
                 _ => match callbacks.get(&(reason as u32)) {
                     Some(unknown_gio_callback) => {
+                        let callback_output = match unknown_gio_callback {
+                            Callback::Sync(sync_callback) => sync_callback(reason, data)?,
+                            Callback::Async(async_callback) => async_callback(reason, data).await?,
+                        };
                         machine
-                            .send_cmio_response(reason, &unknown_gio_callback(reason, data).await?)
+                            .send_cmio_response(reason, &callback_output)
                             .unwrap();
                     }
                     None => {
@@ -186,6 +187,13 @@ pub async fn run_advance(
         }
         machine.reset_iflags_y().unwrap();
     }
+}
+
+pub enum Callback {
+    Sync(Box<dyn Fn(u16, Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>>>),
+    Async(
+        Box<dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>>,
+    ),
 }
 
 fn encode_evm_advance(payload: Vec<u8>) -> Vec<u8> {
