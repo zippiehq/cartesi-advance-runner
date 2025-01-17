@@ -140,6 +140,24 @@ pub async fn run_advance(
                 HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT => {
                     output_callback(reason, &data)?;
                 }
+                _ => {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("unknown reason {:?}", reason),
+                    )));
+                }
+            },
+            HTIF_YIELD_CMD_MANUAL => match reason {
+                HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
+                    finish_callback(reason, &data)?;
+                    return Ok(YieldManualReason::Accepted);
+                }
+                HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
+                    return Ok(YieldManualReason::Rejected);
+                }
+                HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION => {
+                    return Ok(YieldManualReason::Exception);
+                }
                 _ => match callbacks.get(&(reason as u32)) {
                     Some(unknown_gio_callback) => {
                         let callback_output = match unknown_gio_callback {
@@ -159,24 +177,6 @@ pub async fn run_advance(
                         )));
                     }
                 },
-            },
-            HTIF_YIELD_CMD_MANUAL => match reason {
-                HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
-                    finish_callback(reason, &data)?;
-                    return Ok(YieldManualReason::Accepted);
-                }
-                HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
-                    return Ok(YieldManualReason::Rejected);
-                }
-                HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION => {
-                    return Ok(YieldManualReason::Exception);
-                }
-                _ => {
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("unknown reason {:?}", reason),
-                    )));
-                }
             },
             _ => {
                 return Err(Box::new(std::io::Error::new(
