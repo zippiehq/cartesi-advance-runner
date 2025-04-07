@@ -153,9 +153,11 @@ pub async fn run_advance(
                     return Ok(YieldManualReason::Accepted);
                 }
                 HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
+                    finish_callback(reason, &data)?;
                     return Ok(YieldManualReason::Rejected);
                 }
                 HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION => {
+                    finish_callback(reason, &data)?;
                     return Ok(YieldManualReason::Exception);
                 }
                 _ => match callbacks.get(&(reason as u32)) {
