@@ -1,35 +1,25 @@
-use alloy_primitives::{address, Uint, U256};
+use alloy_primitives::{address, U256};
 use alloy_sol_types::{sol, SolCall};
 use cartesi_machine::{
-    cartesi_machine_sys::{cm_concurrency_runtime_config, cm_htif_runtime_config},
-    configuration::{MemoryRangeConfig, RuntimeConfig},
-    Machine,
+    cartesi_machine_sys::{
+        CM_CMIO_YIELD_REASON_ADVANCE_STATE, CM_CMIO_YIELD_REASON_INSPECT_STATE, CM_REG_IFLAGS_Y,
+    },
+    config::runtime::{ConcurrencyRuntimeConfig, HTIFRuntimeConfig, RuntimeConfig},
+    constants::cmio::{commands, tohost::manual::RX_ACCEPTED},
+    machine::Machine,
+    types::cmio::{AutomaticReason, CmioRequest, CmioResponseReason, ManualReason},
 };
 use std::error::Error;
-use std::ffi::CString;
 use std::fs::File;
 use std::future::Future;
-use std::os::raw::c_char;
+use std::path::Path;
 use std::pin::Pin;
 use std::{collections::HashMap, io::ErrorKind};
 pub mod hash;
 mod merkle_tree;
 pub mod proofs;
-const HTIF_YIELD_CMD_AUTOMATIC: u64 = 0;
-const HTIF_YIELD_CMD_MANUAL: u64 = 1;
-const HTIF_YIELD_REASON_ADVANCE_STATE_DEF: u16 = 0;
-const HTIF_YIELD_AUTOMATIC_REASON_TX_REPORT: u16 = 0x4;
-const HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT: u16 = 0x2;
-
-const HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED: u16 = 0x1;
-const HTIF_YIELD_MANUAL_REASON_RX_REJECTED: u16 = 0x2;
-const HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION: u16 = 0x4;
-
-const PMA_CMIO_TX_BUFFER_START_DEF: u64 = 0x60800000;
 
 const MEMORY_RANGE_CONFIG_START: u64 = 0x90000000000000;
-const M16: u64 = (1 << 16) - 1;
-const M32: u64 = (1 << 32) - 1;
 #[derive(PartialEq)]
 pub enum YieldManualReason {
     Accepted,
@@ -66,19 +56,17 @@ pub async fn run_advance(
 
     let mut machine = Machine::load(
         std::path::Path::new(machine_snapshot.as_str()),
-        RuntimeConfig {
-            values: cartesi_machine::cartesi_machine_sys::cm_machine_runtime_config {
-                skip_root_hash_check: true,
-                skip_root_hash_store: true,
-                concurrency: cm_concurrency_runtime_config {
-                    update_merkle_tree: 0,
-                },
-                htif: cm_htif_runtime_config {
-                    no_console_putchar: no_console_putchar,
-                },
-                skip_version_check: false,
-                soft_yield: false,
-            },
+        &RuntimeConfig {
+            skip_root_hash_check: Some(true),
+            skip_root_hash_store: Some(true),
+            concurrency: Some(ConcurrencyRuntimeConfig {
+                update_merkle_tree: Some(0),
+            }),
+            htif: Some(HTIFRuntimeConfig {
+                no_console_putchar: Some(no_console_putchar),
+            }),
+            skip_version_check: Some(false),
+            soft_yield: Some(false),
         },
     )
     .unwrap();
@@ -86,58 +74,48 @@ pub async fn run_advance(
         let lambda_state_previous_file =
             File::open(lambda_state_paths.lambda_state_previous_path).unwrap();
         let lambda_state_previous_file_size = lambda_state_previous_file.metadata().unwrap().len();
-        let cs_filename = CString::new(lambda_state_paths.lambda_state_next_path).unwrap();
-        let mut cs_filename_bytes: Vec<u8> = cs_filename.into_bytes();
-        let filename_pointer: *const c_char = cs_filename_bytes.as_mut_ptr() as *const c_char;
+        let filename = Path::new(&lambda_state_paths.lambda_state_next_path);
         machine
-            .replace_memory_range(&MemoryRangeConfig {
-                start: MEMORY_RANGE_CONFIG_START,
-                length: lambda_state_previous_file_size,
-                shared: true,
-                image_filename: filename_pointer,
-            })
+            .replace_memory_range(
+                MEMORY_RANGE_CONFIG_START,
+                lambda_state_previous_file_size,
+                true,
+                Some(filename),
+            )
             .unwrap();
     }
-    let mut data = machine.read_htif_tohost_data().unwrap();
-    let mut reason = ((data >> 32) & M16) as u16;
-    let cmd = machine.read_htif_tohost_cmd().unwrap();
 
-    if reason == HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED && cmd == HTIF_YIELD_CMD_MANUAL {
+    let cmdio = machine.receive_cmio_request().unwrap();
+
+    if cmdio.reason() == RX_ACCEPTED && cmdio.cmd() == commands::YIELD_MANUAL {
         let payload = payload;
         let encoded = encode_evm_advance(payload);
         machine
-            .send_cmio_response(HTIF_YIELD_REASON_ADVANCE_STATE_DEF, &encoded)
+            .send_cmio_response(CmioResponseReason::Advance, &encoded)
             .unwrap();
         //TODO send gio response with metadata etc.
 
-        machine.reset_iflags_y().unwrap();
+        machine.write_reg(CM_REG_IFLAGS_Y, 0)?;
     } else {
         return Err(Box::new(std::io::Error::new(
             ErrorKind::Other,
-            format!("current reason is {:?}, but 0 was expected", reason),
+            format!("current reason is {:?}, but 0 was expected", cmdio.reason()),
         )));
     }
 
     let max_cycles = u64::MAX;
-
     loop {
-        if !machine.read_iflags_y().unwrap() {
+        if !machine.iflags_y().unwrap() {
             let _ = Some(machine.run(max_cycles).unwrap());
         }
-        data = machine.read_htif_tohost_data().unwrap();
-        let cmd = machine.read_htif_tohost_cmd().unwrap();
-        reason = ((data >> 32) & M16) as u16;
-        let length = data & M32; // length
-        let data = machine
-            .read_memory(PMA_CMIO_TX_BUFFER_START_DEF, length)
-            .unwrap();
-
-        match cmd {
-            HTIF_YIELD_CMD_AUTOMATIC => match reason {
-                HTIF_YIELD_AUTOMATIC_REASON_TX_REPORT => {
+        let cmdio = machine.receive_cmio_request().unwrap();
+        let reason = cmdio.reason();
+        match cmdio {
+            CmioRequest::Automatic(automatic_reason) => (match automatic_reason {
+                AutomaticReason::TxReport { data } => {
                     report_callback(reason, &data)?;
                 }
-                HTIF_YIELD_AUTOMATIC_REASON_TX_OUTPUT => {
+                AutomaticReason::TxOutput { data } => {
                     output_callback(reason, &data)?;
                 }
                 _ => {
@@ -146,51 +124,60 @@ pub async fn run_advance(
                         format!("unknown reason {:?}", reason),
                     )));
                 }
-            },
-            HTIF_YIELD_CMD_MANUAL => match reason {
-                HTIF_YIELD_MANUAL_REASON_RX_ACCEPTED => {
-                    finish_callback(reason, &data)?;
+            },),
+            CmioRequest::Manual(manual_reason) => (match manual_reason {
+                ManualReason::RxAccepted {
+                    output_hashes_root_hash,
+                } => {
+                    finish_callback(reason, &output_hashes_root_hash)?;
                     return Ok(YieldManualReason::Accepted);
                 }
-                HTIF_YIELD_MANUAL_REASON_RX_REJECTED => {
-                    finish_callback(reason, &data)?;
+                ManualReason::RxRejected => {
+                    finish_callback(reason, vec![])?;
                     return Ok(YieldManualReason::Rejected);
                 }
-                HTIF_YIELD_MANUAL_REASON_TX_EXCEPTION => {
-                    finish_callback(reason, &data)?;
+                ManualReason::TxException { message } => {
+                    finish_callback(reason, message.as_bytes().to_vec())?;
                     return Ok(YieldManualReason::Exception);
                 }
-                _ => match callbacks.get(&(reason as u32)) {
-                    Some(unknown_gio_callback) => {
-                        let callback_output = match unknown_gio_callback {
-                            Callback::Sync(sync_callback) => sync_callback(reason, data)?,
-                            Callback::Async(async_callback) => async_callback(reason, data).await?,
-                        };
-                        machine
-                            .send_cmio_response(reason, &callback_output)
-                            .unwrap();
-                    }
-                    None => {
-                        println!("No callback found");
-                        drop(machine);
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("No callback found"),
-                        )));
-                    }
-                },
-            },
-            _ => {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("unknown cmd {:?}", cmd),
-                )));
-            }
-        }
-        machine.reset_iflags_y().unwrap();
+                ManualReason::GIO { domain: _, data } => {
+                    match callbacks.get(&(reason as u32)) {
+                        Some(unknown_gio_callback) => {
+                            let callback_output = match unknown_gio_callback {
+                                Callback::Sync(sync_callback) => sync_callback(reason, data)?,
+                                Callback::Async(async_callback) => {
+                                    async_callback(reason, data).await?
+                                }
+                            };
+                            let cmdio_send_reason = match reason as u32 {
+                                CM_CMIO_YIELD_REASON_ADVANCE_STATE => CmioResponseReason::Advance,
+                                CM_CMIO_YIELD_REASON_INSPECT_STATE => CmioResponseReason::Inspect,
+                                _ => {
+                                    return Err(Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        format!("Unknown cmdio reason"),
+                                    )));
+                                }
+                            };
+                            machine
+                                .send_cmio_response(cmdio_send_reason, &callback_output)
+                                .unwrap();
+                        }
+                        None => {
+                            println!("No callback found");
+                            drop(machine);
+                            return Err(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("No callback found"),
+                            )));
+                        }
+                    };
+                }
+            },),
+        };
+        machine.write_reg(CM_REG_IFLAGS_Y, 0)?;
     }
 }
-
 pub enum Callback {
     Sync(Box<dyn Fn(u16, Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>>>),
     Async(
