@@ -133,11 +133,11 @@ pub async fn run_advance(
                     return Ok(YieldManualReason::Accepted);
                 }
                 ManualReason::RxRejected => {
-                    finish_callback(reason, vec![])?;
+                    finish_callback(reason, &[])?;
                     return Ok(YieldManualReason::Rejected);
                 }
                 ManualReason::TxException { message } => {
-                    finish_callback(reason, message.as_bytes().to_vec())?;
+                    finish_callback(reason, message.as_bytes())?;
                     return Ok(YieldManualReason::Exception);
                 }
                 ManualReason::GIO { domain: _, data } => {
